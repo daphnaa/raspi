@@ -5,13 +5,17 @@ import datetime as dt
 import json, os, io, time, re, requests
 import threading
 
+import socket
+import json
+import threading
+import time
+
 
 # --- config ---
 SAVE_ROOT = Path("/tmp/incoming_frames")
 VLM_URL   = os.environ.get("VLM_URL", "http://127.0.0.1:8080/describe")
 VLM_MODE  = os.environ.get("VLM_MODE", "path")  # "path" or "upload"
 
-# אם נתיב ההרצה בתוך הקונטיינר שונה, אפשר למפות כאן (host->container)
 REMAP_SRC = os.environ.get("REMAP_SRC", "/tmp/incoming_frames")
 REMAP_DST = os.environ.get("REMAP_DST", "/tmp/incoming_frames")
 
@@ -26,6 +30,51 @@ _RX_COMPACT = re.compile(
 _RX_UNDERSCORE = re.compile(
     r".*?_x(?P<x>-?\d+(?:\.\d+)?)_y(?P<y>-?\d+(?:\.\d+)?)_z(?P<z>-?\d+(?:\.\d+)?)_yaw(?P<yaw>-?\d+(?:\.\d+)?)(?:\.[A-Za-z0-9]+)$"
 )
+DISCOVERY_PORT = 50001  # must match Pi
+
+def _get_local_ip() -> str | None:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return None
+
+def beacon_loop(stop_event: threading.Event, upload_port: int):
+    hostname = socket.gethostname()
+    ip = _get_local_ip()
+
+    if ip:
+        print(f"[beacon] advertising capture receiver at http://{ip}:{upload_port}")
+    else:
+        print("[beacon] WARN: couldn't detect IP; broadcasting with empty URL")
+
+    while not stop_event.is_set():
+        payload = {
+            "type": "capture_receiver",
+            "url": f"http://{ip}:{upload_port}" if ip else "",
+            "host": hostname,
+            "version": 1,
+        }
+        data = json.dumps(payload).encode("utf-8")
+
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.settimeout(0.2)
+            s.sendto(data, ("255.255.255.255", DISCOVERY_PORT))
+        except Exception:
+            pass
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+        stop_event.wait(5.0)
+
 
 def _parse_pose_from_name(path: Path):
     s = str(path)
@@ -204,4 +253,14 @@ def upload():
     }, 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001)
+    UPLOAD_PORT = 5001  # whatever your receiver_vlm /upload uses
+
+    stop_event = threading.Event()
+    t = threading.Thread(target=beacon_loop, args=(stop_event, UPLOAD_PORT), daemon=True)
+    t.start()
+
+    try:
+        app.run(host="0.0.0.0", port=UPLOAD_PORT)
+    finally:
+        stop_event.set()
+
