@@ -1,0 +1,19 @@
+[Unit]
+Description=HTTP-triggered capture → upload service (Picamera2)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/GIT/raspi
+ExecStartPre=/bin/sh -c '/usr/bin/udevadm settle || true'
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/bin/python3 /home/pi/GIT/raspi/capture_service.py \
+  --bind 0.0.0.0 --port 8088 \
+  --width 1280 --height 720 --quality 90 --warmup 0.8
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

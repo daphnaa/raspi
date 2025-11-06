@@ -108,12 +108,6 @@ def discover_receiver(timeout: float = 8.0) -> str | None:
 
 
 def discover_receiver_via_scan(port: int = 5001, timeout: float = 0.7) -> str | None:
-    """
-    Scan local Wi-Fi subnet for a capture receiver:
-    - GET http://IP:port/health
-    - Expect JSON with {"ok": true, "role": "capture_receiver"} or similar
-    Returns base URL like "http://IP:5001" or None.
-    """
     net = _get_wlan_subnet("wlan0")
     if not net:
         print("[discover-scan] no wlan0 subnet found")
@@ -121,31 +115,30 @@ def discover_receiver_via_scan(port: int = 5001, timeout: float = 0.7) -> str | 
 
     print(f"[discover-scan] scanning {net} for receiver on port {port}")
 
-    # Don’t hammer broadcast or network address
-    candidates = [str(ip) for ip in net.hosts()]
-
-    for ip in candidates:
+    for ip in net.hosts():
         url = f"http://{ip}:{port}/health"
         try:
             r = requests.get(url, timeout=timeout)
         except Exception:
             continue
-
         if r.status_code != 200:
             continue
-
         try:
             j = r.json()
         except Exception:
             continue
 
-        if isinstance(j, dict) and j.get("ok") is True and j.get("role") in ("capture_receiver", "receiver", "vlm_receiver"):
+        print(f"[discover-scan] {ip}: {j}")  # debug
+
+        if isinstance(j, dict) and ((j.get("ok") is True) or (j.get("status") == "ok")):
             base = f"http://{ip}:{port}"
             print(f"[discover-scan] found receiver at {base}")
             return base
 
     print("[discover-scan] no receiver found")
     return None
+
+
 
 
 def _get_wlan_subnet(iface: str = "wlan0"):
@@ -268,7 +261,7 @@ def main():
     ap.add_argument(
         "--receiver-url",
         default=os.environ.get("RECEIVER_URL", ""),
-        help="Receiver base URL. If empty, try auto-discovery."
+        help="Receiver base URL, e.g. http://x.x.x.x:5001 (if empty → auto-discover)"
     )
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
@@ -277,7 +270,6 @@ def main():
     args = ap.parse_args()
 
     if not args.receiver_url:
-        # direct subnet scan, hotspot-friendly
         args.receiver_url = discover_receiver_via_scan(port=5001, timeout=0.7) or ""
 
     if not args.receiver_url:
