@@ -32,7 +32,7 @@ class CaptureWorker:
                     raise RuntimeError("cv2.imencode failed")
                 files = {"image": ("frame.jpg", io.BytesIO(jpg.tobytes()), "image/jpeg")}
                 data = {"name": name, "index": str(i)}
-                r = requests.post(f"{self.receiver_url}/upload", files=files, data=data, timeout=10)
+                r = requests.post(f"{self.receiver_url}/upload", files=files, data=data, timeout=60)
                 r.raise_for_status()
                 if i < count - 1 and interval > 0:
                     time.sleep(interval)
