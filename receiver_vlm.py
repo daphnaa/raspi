@@ -132,7 +132,6 @@ def upload():
     auto_prompt = "Describe the objects in the image"
     response_text = None
     if isinstance(vlm_json, dict):
-        # התבנית הנוכחית של /describe:
         auto_prompt  = vlm_json.get("auto_prompt") or auto_prompt
         response_text = vlm_json.get("response_describe") or vlm_json.get("response") or None
     if not response_text and isinstance(vlm_raw, str):
@@ -148,8 +147,7 @@ def upload():
                 "prompt": auto_prompt,
                 "response": response_text or ""
             }
-        ],
-        "vlm_caption": vlm_raw or ""
+        ]
     }
 
     sidecar_path = session_dir / f"{stem}.json"
