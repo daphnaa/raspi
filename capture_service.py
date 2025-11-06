@@ -13,10 +13,11 @@ import ipaddress
 BCAST_DEFAULT_PORT = 50000
 
 
+import subprocess
+
 def get_iface_ip(iface: str) -> str | None:
     """
     Return IPv4 address for given interface (e.g. wlan0), or None.
-    Uses `ip -4 addr show`.
     """
     try:
         out = subprocess.check_output(
@@ -30,18 +31,29 @@ def get_iface_ip(iface: str) -> str | None:
     for line in out.splitlines():
         line = line.strip()
         if line.startswith("inet "):
-            # inet 172.16.17.9/24 ...
             return line.split()[1].split("/")[0]
     return None
 
 
+import socket
+import threading
+import json
+
 def broadcast_ip_loop(stop_event: threading.Event,
                       iface: str,
                       port: int,
-                      receiver_url: str,
+                      receiver_url: str | None = None,
                       interval: float = 10.0):
     """
-    Periodically broadcast this Pi's IP over UDP.
+    Periodically broadcast this Pi's IP over UDP broadcast.
+    Listeners can pick up:
+      {
+        "type": "raspi_cam",
+        "host": "<hostname>",
+        "iface": "<iface>",
+        "ip": "<ip>",
+        "receiver_url": "<url or ''>"
+      }
     """
     hostname = socket.gethostname()
 
@@ -53,7 +65,7 @@ def broadcast_ip_loop(stop_event: threading.Event,
                 "host": hostname,
                 "iface": iface,
                 "ip": ip,
-                "receiver_url": receiver_url,
+                "receiver_url": receiver_url or "",
             }
             data = json.dumps(payload).encode("utf-8")
 
@@ -63,7 +75,6 @@ def broadcast_ip_loop(stop_event: threading.Event,
                 s.settimeout(0.2)
                 s.sendto(data, ("255.255.255.255", port))
             except Exception:
-                # keep it quiet; we'll try again next interval
                 pass
             finally:
                 try:
@@ -73,6 +84,7 @@ def broadcast_ip_loop(stop_event: threading.Event,
 
         # even if no IP yet, retry later
         stop_event.wait(interval)
+
 
 DISCOVERY_PORT = 50001
 
@@ -270,7 +282,9 @@ def main():
     args = ap.parse_args()
 
     if not args.receiver_url:
-        args.receiver_url = discover_receiver_via_scan(port=5001, timeout=0.7) or ""
+        # First try UDP beacon from receiver_vlm (type=capture_receiver),
+        # then fall back to subnet scan if no beacon heard.
+        args.receiver_url = discover_receiver(timeout=8.0) or ""
 
     if not args.receiver_url:
         raise SystemExit("[capture_service] ERROR: no receiver-url and auto-discovery failed")
@@ -279,6 +293,14 @@ def main():
     Handler.worker = worker
     srv = ThreadingHTTPServer((args.bind, args.port), Handler)
     print(f"[capture_service] listening on {args.bind}:{args.port} → sending to {args.receiver_url}/upload")
+
+    stop_event = threading.Event()
+    t = threading.Thread(
+        target=broadcast_ip_loop,
+        args=(stop_event, "wlan0", 50001, args.receiver_url),
+        daemon=True
+    )
+    t.start()
 
     try:
         srv.serve_forever()
