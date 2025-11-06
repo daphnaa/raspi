@@ -3,6 +3,8 @@ from flask import Flask, request
 from pathlib import Path
 import datetime as dt
 import json, os, io, time, re, requests
+import threading
+
 
 # --- config ---
 SAVE_ROOT = Path("/tmp/incoming_frames")
@@ -92,6 +94,80 @@ def vlm_call_path(image_path: str, timeout=60.0):
         txt = r.text.strip()
         return None, txt
 
+def process_vlm_async(img_path: Path, stem: str, session_dir: Path):
+    try:
+        # small delay so file is fully flushed
+        time.sleep(0.05)
+
+        vlm_json, vlm_raw = None, None
+        err = None
+        try:
+            if VLM_MODE.lower() == "upload":
+                vlm_json, vlm_raw = vlm_call_upload(img_path.read_bytes())
+            else:
+                vlm_json, vlm_raw = vlm_call_path(_remap_for_vlm(str(img_path)))
+        except Exception as e:
+            err = str(e)
+
+        pose = _parse_pose_from_name(img_path) if "_parse_pose_from_name" in globals() else None
+        if not isinstance(pose, dict):
+            pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+
+        auto_prompt = "Describe the objects in the image"
+        response_text = None
+        if isinstance(vlm_json, dict):
+            auto_prompt = vlm_json.get("auto_prompt") or auto_prompt
+            response_text = vlm_json.get("response_describe") or vlm_json.get("response") or None
+        if not response_text and isinstance(vlm_raw, str):
+            response_text = vlm_raw
+
+        vlm_caption = None
+        if isinstance(vlm_json, dict):
+            vlm_caption = json.dumps(vlm_json, ensure_ascii=False)
+        elif isinstance(vlm_raw, str):
+            vlm_caption = vlm_raw
+
+        entries = []
+        if response_text:
+            entries.append({
+                "timestamp": int(time.time()),
+                "prompt": auto_prompt,
+                "response": response_text
+            })
+
+        sidecar_path = session_dir / f"{stem}.json"
+
+        # merge if exists
+        obj = {}
+        if sidecar_path.exists():
+            try:
+                with open(sidecar_path, "r", encoding="utf-8") as f:
+                    obj = json.load(f)
+            except Exception:
+                obj = {}
+
+        if not isinstance(obj, dict):
+            obj = {}
+
+        obj["pose"] = pose
+        obj["image"] = img_path.name
+        if entries:
+            obj.setdefault("entries", []).extend(entries)
+        if vlm_caption:
+            obj["vlm_caption"] = vlm_caption
+        if err and "vlm_error" not in obj:
+            obj["vlm_error"] = err
+
+        tmp = str(sidecar_path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, sidecar_path)
+
+        print(f"[receiver_vlm][json] updated: {sidecar_path}")
+
+    except Exception as e:
+        print(f"[receiver_vlm][async][error] {e}")
+
 # --- routes ---
 @app.get("/health")
 def health():
@@ -105,7 +181,7 @@ def upload():
     session_hint = request.form.get("session", "").strip() or None
 
     if not f:
-        return {"error":"no file"}, 400
+        return {"error": "no file"}, 400
 
     session_dir = _session_dir(name, session_hint)
     stamp_short = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -113,55 +189,19 @@ def upload():
     img_path = session_dir / f"{stem}.jpg"
     f.save(img_path)
 
-    # tiny fs settle to avoid races
-    time.sleep(0.05)
+    # kick off async VLM + JSON update
+    threading.Thread(
+        target=process_vlm_async,
+        args=(img_path, stem, session_dir),
+        daemon=True
+    ).start()
 
-    # call VLM (prefer path mode to match /describe)
-    err = None
-    vlm_json = None
-    vlm_raw  = None
-    try:
-        if VLM_MODE.lower() == "upload":
-            vlm_json, vlm_raw = vlm_call_upload(img_path.read_bytes())
-        else:
-            vlm_json, vlm_raw = vlm_call_path(_remap_for_vlm(str(img_path)))
-    except Exception as e:
-        err = str(e)
-
-    # extract prompt+response for entries
-    auto_prompt = "Describe the objects in the image"
-    response_text = None
-    if isinstance(vlm_json, dict):
-        auto_prompt  = vlm_json.get("auto_prompt") or auto_prompt
-        response_text = vlm_json.get("response_describe") or vlm_json.get("response") or None
-    if not response_text and isinstance(vlm_raw, str):
-        response_text = vlm_raw  # fallback to raw text
-
-    # build sidecar in the requested schema
-    sidecar_obj = {
-        "pose": _parse_pose_from_name(img_path),
-        "image": img_path.name,
-        "entries": [
-            {
-                "timestamp": int(time.time()),
-                "prompt": auto_prompt,
-                "response": response_text or ""
-            }
-        ]
-    }
-
-    sidecar_path = session_dir / f"{stem}.json"
-    sidecar_path.write_text(json.dumps(sidecar_obj, ensure_ascii=False, indent=2))
-
-    ok = (err is None) and bool(response_text or vlm_raw)
-    status = 200 if ok else 502
+    # return immediately → Pi never times out
     return {
-        "ok": ok,
+        "ok": True,
         "saved": str(img_path),
-        "session_dir": str(session_dir),
-        "sidecar": str(sidecar_path),
-        "error": err
-    }, status
+        "session_dir": str(session_dir)
+    }, 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001)
